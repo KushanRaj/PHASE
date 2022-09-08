@@ -23,6 +23,7 @@ def compute_grad(inputs, outputs):
         outputs=outputs,
         inputs=inputs,
         grad_outputs=torch.ones_like(outputs, requires_grad=False, device=outputs.device),
+        retain_graph=True
         )
         
     return points_grad[0]
@@ -68,9 +69,9 @@ class Trainer:
 
         model = network.ImplicitNet(d_in = args.d_in,
                                     dims = [int(i) for i in args.dims.split(',')],
-                                    skip = [int(i) for i in args.dims.skip(',')],
+                                    skip_in = [int(i) for i in args.skip.split(',')],
                                     geometric_init=args.geometric_init,
-                                    radius_init=args.radius_int,
+                                    radius_init=args.radius_init,
                                     beta = args.beta)
                     
         if args.dist:
@@ -82,6 +83,9 @@ class Trainer:
             )
         else:
             self.model = model.to(self.device)
+
+        self.optim = torch.optim.Adam(self.model.parameters(), lr = self.args.lr, weight_decay = 0)
+
         if self.main_thread:
             print(f"# of model parameters: {sum(p.numel() for p in self.model.parameters())/1e6}M")
 
@@ -95,7 +99,7 @@ class Trainer:
         if args.lr_sched == "cosine":
             self.lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(self.optim, total_steps)
         elif args.lr_sched == 'step':
-            self.lr_sched = torch.optim.lr_scheduler.StepLR(self.optim, args.step_size, args.lr_decay)
+            self.lr_sched = torch.optim.lr_scheduler.StepLR(self.optim, args.lr_step_size, args.lr_decay)
         elif args.lr_sched == "multi_step":
             milestones = [
                 int(milestone) - total_steps for milestone in args.lr_decay_steps.split(",")
@@ -165,44 +169,49 @@ class Trainer:
         self.metric_meter.reset()
         self.time_meter.reset()
         self.model.train()
-        for indx, (points, normals) in enumerate(self.train_loader):
+        for indx, (points, normals, sampled_points) in enumerate(self.train_loader):
             
             points = points.to(self.device)
 
             B, N, _ = points.shape
 
-            if self.with_normals:
+            if self.args.with_normals:
                 normals = normals.cuda()
 
-            reconstruction_points = utils.sample_local_points(points)
-            sampled_points = utils.sample_global_points()
+            reconstruction_points = utils.sample_local_points(points).to(self.device)
+            #sampled_points = utils.sample_global_points(points.shape).to(self.device)
 
             sampled_points.requires_grad = True
             reconstruction_points.requires_grad = True
+            points.requires_grad = True
 
             points_density = self.model(points).view(B, N)
             reconstruction_density = self.model(reconstruction_points).view(B, N)
             sampled_density = self.model(sampled_points).view(B, N)
 
-            perimeter_loss = compute_grad(sampled_points, sampled_density).norm(2, -1).sum(-1).mean()*(1.5**3)/N
-            sdf_loss = W(sampled_density).sum(-1).mean()*(1.5**3)/N
+            perimeter_loss = compute_grad(sampled_points, sampled_density).norm(2, -1).mean(-1).mean()
+            sdf_loss = W(sampled_density).mean(-1).mean()
 
-            if self.with_normals:
-                point_normal_loss = (normals - compute_grad(points, points_density)).norm(2, -1).mean()
+            # _w = -(self.args.eta**0.5) * torch.log(1 - points_density.abs().unsqueeze(-1))*(points_density.unsqueeze(-1)/(points_density.abs().unsqueeze(-1)))
+
+            # print(_w)
+
+            if self.args.with_normals:
+                point_normal_loss = (normals - (self.args.eta**0.5)*points_density.unsqueeze(-1)).abs().mean()
             else:
-                point_normal_loss = (1 - compute_grad(points, points_density)).norm(2, -1).mean()
+                point_normal_loss = (1 - (self.args.eta**0.5)*points_density.unsqueeze(-1)).abs().mean()
 
-            reconstruction_loss = reconstruction_density.sum(-1).abs().mean()*(1.5**3)/N
+            reconstruction_loss = reconstruction_density.mean(-1).abs().mean()
 
-            loss = reconstruction_loss*self.args.eta + self.args.lbda*perimeter_loss + self.args.mu*point_normal_loss + sdf_loss
+            loss = reconstruction_loss*self.args.lbda + self.args.eta*perimeter_loss + self.args.mu*point_normal_loss + sdf_loss# + points_density.abs().mean()
 
-            self.optimizer.zero_grad()
+            self.optim.zero_grad()
 
             loss.backward()
 
-            self.optimizer.step()
+            self.optim.step()
 
-            metrics = {"train_loss": loss.item(), "recon" : reconstruction_loss.item(), "lbda" : perimeter_loss.item(), "normal" : point_normal_loss.item(), "sdf" : sdf_loss.item()}
+            metrics = {"loss": loss.item(), "rec" : reconstruction_loss.item(), "peri" : perimeter_loss.item(), "norm" : point_normal_loss.item(), "sdf" : sdf_loss.item()}
             self.metric_meter.add(metrics)
 
             if self.main_thread and indx % self.args.log_every == 0:
@@ -226,15 +235,19 @@ class Trainer:
             utils.pbar(1, msg=self.metric_meter.msg() + self.time_meter.msg())
 
     @torch.no_grad()
-    def plot(self, points, epoch):
+    def plot(self, epoch):
         self.model.eval()
-        plot_surface(with_points=True,
-                    points=points,
-                         decoder=self.model,
-                         path=self.args.out_dir,
-                         epoch=epoch,
-                         shapename=self.args.name,
-                         mc_value=0, save_html=self.args.save_html, resolution=self.args.resolution)
+        plot_surface(
+                    decoder=self.model,
+                    path=self.args.out_dir,
+                    epoch=epoch,
+                    shapename=self.args.name,
+                    mc_value=0, 
+                    save_html=self.args.save_html, 
+                    resolution=self.args.resolution, 
+                    verbose = self.args.plot_verbose, 
+                    save_ply = self.args.save_ply
+                    )
 
     def train(self):
         best_train, best_val = float('inf'), float('inf')
@@ -248,29 +261,24 @@ class Trainer:
             self.train_epoch()
             if self.main_thread:
                 train_metrics = self.metric_meter.get()
-                if train_metrics["train_loss"] < best_train:
+                if train_metrics["loss"] < best_train:
                     print(
                         "\x1b[34m"
-                        + f"train loss improved from {round(best_train, 5)} to {round(train_metrics['train_loss'], 5)}"
+                        + f"train loss improved from {round(best_train, 5)} to {round(train_metrics['loss'], 5)}"
                         + "\033[0m"
                     )
-                    best_train = train_metrics["train_loss"]
+                    best_train = train_metrics["loss"]
 
                     torch.save(
                         self.model.state_dict(),
                         os.path.join(self.args.out_dir, f"best.ckpt"),
                     )
-                msg = f"epoch: {epoch}, last train: {round(train_metrics['train_loss'], 5)}, best train: {round(best_train, 5)}"
+                msg = f"epoch: {epoch}, last train: {round(train_metrics['loss'], 5)}, best train: {round(best_train, 5)}"
 
                 self.log_f.write(msg + f", lr: {round(self.optim.param_groups[0]['lr'], 5)}\n")
                 self.log_f.flush()
 
                 if self.log_wandb:
-
-                    if epoch % self.args.plot_every == 0:
-
-                        self.plot(self.grid)
-                    
 
                     train_metrics = {"epoch " + key: value for key, value in train_metrics.items()}
                     wandb.log(
@@ -280,6 +288,10 @@ class Trainer:
                             "lr": self.optim.param_groups[0]["lr"],
                         }
                     )
+
+                if epoch % self.args.plot_every == 0:
+
+                    self.plot(epoch)
 
                 torch.save(
                     {

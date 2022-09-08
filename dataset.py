@@ -11,15 +11,11 @@ class PCLoader(Dataset):
         self.points_batch = points_batch
         self.with_normals = with_normals
 
+        self.data = torch.from_numpy(np.loadtxt(f"{root}/{name}", delimiter=' ').astype(np.float32)) 
+
         if self.with_normals:
-            data = torch.from_numpy(np.loadtxt(f"{root}/{name.replace('_', '_normals_')}", delimiter=' ').astype(np.float32))
-            self.normals = data[:, 3:]
-            self.data = data[:, :3]   
-
-        else:
-            self.data = torch.from_numpy(np.loadtxt(f"{root}/{name}", delimiter=' ').astype(np.float32)) 
-
-        self.data /= self.data.pow(2).sum(-1).pow(0.5).max()
+            self.normals = self.data[:, 3:]
+            self.data = self.data[:, :3]   
 
 
     def __getitem__(self, index):
@@ -27,6 +23,10 @@ class PCLoader(Dataset):
 
         idx = torch.randperm(self.data.shape[0])[:self.points_batch]
         points = self.data[idx]
+
+        points -= points.mean(0, keepdims = True)
+
+        points /= points.pow(2).sum(-1).pow(0.5).max()
     
         if self.with_normals:
             normals = self.normals[idx]
@@ -34,7 +34,9 @@ class PCLoader(Dataset):
         else:
             normals = torch.empty(0)
 
-        return points, normals
+        phi = (((torch.rand(points.shape) * (points.max(0)[0] - points.min(0)[0])) + points.min(0)[0]).numpy()) * 1.5
+
+        return points, normals, phi
 
     def __len__(self):
         return len(self.data)

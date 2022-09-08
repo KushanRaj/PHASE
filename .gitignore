@@ -6,6 +6,12 @@ __pycache__/
 # C extensions
 *.so
 
+#random stuff
+data
+output
+*.zip
+*.ipynb
+
 # Distribution / packaging
 .Python
 build/

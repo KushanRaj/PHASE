@@ -7,6 +7,18 @@ from datetime import datetime
 import time
 import os
 
+def sample_local_points(pc_input, local_sigma=1e-3):
+
+    batch_size, sample_size, dim = pc_input.shape
+
+    sample_local = pc_input + (torch.randn_like(pc_input) * local_sigma)
+    
+    return sample_local
+
+def sample_global_points(shape):
+
+    return (torch.rand(shape) - 0.5) * 3
+
 def to_cuda(torch_obj):
     if torch.cuda.is_available():
         return torch_obj.cuda()
@@ -115,7 +127,6 @@ def get_surface_trace(points,decoder,latent,resolution,mc_value,is_uniform,verbo
             grid = get_grid(None, resolution)
 
     z = []
-
     for i,pnts in enumerate(torch.split(grid['grid_points'],100000,dim=0)):
         if (verbose):
             print ('{0}'.format(i/(grid['grid_points'].shape[0] // 100000) * 100))
@@ -130,7 +141,7 @@ def get_surface_trace(points,decoder,latent,resolution,mc_value,is_uniform,verbo
         import trimesh
         z  = z.astype(np.float64)
 
-        verts, faces, normals, values = measure.marching_cubes_lewiner(
+        verts, faces, normals, values = measure.marching_cubes(
             volume=z.reshape(grid['xyz'][1].shape[0], grid['xyz'][0].shape[0],
                              grid['xyz'][2].shape[0]).transpose([1, 0, 2]),
             level=mc_value,
@@ -159,8 +170,6 @@ def get_surface_trace(points,decoder,latent,resolution,mc_value,is_uniform,verbo
         trace.append(go.Mesh3d(x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
                           i=I, j=J, k=K, name='',
                           color='orange', opacity=0.5))
-
-
 
     return {"mesh_trace":trace,
             "mesh_export":meshexport}
@@ -363,7 +372,7 @@ def add_args(parser):
     parser.add_argument("--n_cores", type=int, default=0, help="set tpu core count")
     parser.add_argument("--dist", action="store_true", help="start distributed training")
     parser.add_argument("--dset", type=str, default="cifar10", help="dataset name")
-    parser.add_argument("--batch_size", type=int, default=2, help="batch size")
+    parser.add_argument("--batch_size", type=int, default=4, help="batch size")
     parser.add_argument(
         "--n_workers", type=int, default=4, help="number of workers for dataloading"
     )
@@ -398,12 +407,12 @@ def add_args(parser):
     )
     parser.add_argument("--resume", action="store_true", help="resume training from checkpoint")
     parser.add_argument("--wandb", action="store_true", help="start wandb logging")
-    parser.add_argument("--plot_every", type=int, default=10, help="eval frequency")
+    parser.add_argument("--plot_every", type=int, default=1, help="eval frequency")
     parser.add_argument("--log_every", type=int, default=1, help="logging frequency")
 
     parser.add_argument("--d_in", type=int, default=3, help="number of epochs")
-    parser.add_argument("--dims", type=float, default="512,512,512,512,512,512,512,512", help="number of epochs")
-    parser.add_argument("--skip", type = float, default = "4")
+    parser.add_argument("--dims", type=str, default="512,512,512,512,512,512,512,512", help="number of epochs")
+    parser.add_argument("--skip", type = str, default = "4")
     parser.add_argument("--geometric_init", type = bool, default = True)
     parser.add_argument("--radius_init", type = float, default = 1.0)
     parser.add_argument("--beta", type = int, default = 100)
@@ -411,9 +420,14 @@ def add_args(parser):
     parser.add_argument("--root", type = str, required = True)
     parser.add_argument("--name", type = str, required = True)
     parser.add_argument("--points_batch", type = int, default = 16_000)
-    parser.add_argument("--with_normals", type = bool, default = True)
+    parser.add_argument("--with_normals", action="store_true")
     parser.add_argument("--save_html", action = "store_true")
-    parser.add_argument("--resolution", type = int, default = 50)
+    parser.add_argument("--save_ply", action = "store_true")
+    parser.add_argument("--plot_verbose", action = "store_true")
+    parser.add_argument("--resolution", type = int, default = 512)
+    parser.add_argument("--eta", type = float, default = 0.01)
+    parser.add_argument("--mu", type = float, default = 10)
+    parser.add_argument('--lbda', type = float, default = 10)
 
     return parser
 
