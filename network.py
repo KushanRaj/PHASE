@@ -1,3 +1,10 @@
+'''
+DISCLAIMER
+The network from the IGR repo as they are only auxialiry functions such as plotting and saving ply files
+as I believe the base network is the across all repositories and hence does'nt require too much brainwork to write the code
+
+'''
+
 import torch.nn as nn
 import torch
 import numpy as np

@@ -65,10 +65,7 @@ if __name__ == "__main__":
 
             ref = as_mesh(trimesh.load(f'data/meshes/{TYPE}.obj'))
 
-            # Make sure l=1.0 maps to 1/10th of the AABB. https://arxiv.org/pdf/1612.00603.pdf
             vpos_ref = norm(sample_mesh(ref, POINTS[TYPE]))
-            # scale = 10.0 / np.amax(np.amax(ref.vertices, axis=0) - np.amin(ref.vertices, axis=0))
-            # ref.vertices = ref.vertices * scale
 
             for folder in [i for i in os.listdir('output') if TYPE in i]:
                 print(folder)
@@ -80,9 +77,6 @@ if __name__ == "__main__":
                 
                     mesh = as_mesh(trimesh.load(file))
                     
-                    #mesh.vertices = mesh.vertices * scale
-
-                    # Sample mesh surfaces
                     vpos_mesh = norm(sample_mesh(mesh, POINTS[TYPE]))
 
                     loss = chamfer_dist(vpos_mesh[None, ...], vpos_ref[None, ...]).item()

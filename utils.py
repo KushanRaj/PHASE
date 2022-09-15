@@ -1,3 +1,9 @@
+'''
+DISCLAIMER
+Most of the code here was copied from the IGR repo as they are only auxialiry functions such as plotting and saving ply files
+
+'''
+
 import plotly.graph_objs as go
 import plotly.offline as offline
 import torch

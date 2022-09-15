@@ -247,10 +247,6 @@ class Trainer:
             perimeter_loss = compute_grad(sampled_points, sampled_density).norm(2, -1).mean(-1).mean()
             sdf_loss = W(sampled_density).mean(-1).mean()
 
-            # _w = -(self.args.eta**0.5) * torch.log(1 - points_density.abs().unsqueeze(-1))*(points_density.unsqueeze(-1)/(points_density.abs().unsqueeze(-1)))
-
-            # print(_w)
-
             if self.args.use_normal:
                 point_normal_loss = (normals - (self.args.eta**0.5)*points_density.unsqueeze(-1)).abs().mean(-1).mean()
             else:
@@ -260,10 +256,9 @@ class Trainer:
 
             del reconstruction_points, points, reconstruction_density, points_density
 
+            #my failed loss
             # sampled_reconstruction_points = utils.sample_local_points(sampled_points, local_sigma = self.args.local_sigma, sample_size = self.args.sample_N).to(self.device)
             # sampled_reconstruction_loss = (self.model(sampled_reconstruction_points).view(B, N, self.args.sample_N) - sampled_density.unsqueeze(-1)).norm(2, -1).mean(-1).mean(-1).mean()
-
-            #geo = points_density.abs().mean()
 
             loss = (reconstruction_loss)*self.args.lbda + self.args.eta*perimeter_loss + self.args.mu*point_normal_loss + sdf_loss
 
