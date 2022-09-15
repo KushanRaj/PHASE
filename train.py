@@ -12,6 +12,54 @@ import json
 import network
 from torch.autograd import grad
 from utils import plot_surface
+import trimesh
+
+def as_mesh(scene_or_mesh):
+    if isinstance(scene_or_mesh, trimesh.Scene):
+        assert len(scene_or_mesh.geometry) > 0
+        mesh = trimesh.util.concatenate(
+            tuple(trimesh.Trimesh(vertices=g.vertices, faces=g.faces)
+                for g in scene_or_mesh.geometry.values()))
+    else:
+        assert isinstance(scene_or_mesh, trimesh.Trimesh)
+        mesh = scene_or_mesh
+    return mesh
+
+def sample_mesh(m, n):
+    vpos, _ = trimesh.sample.sample_surface(m, n)
+    return torch.tensor(vpos, dtype=torch.float32)
+
+class Embedder:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.create_embedding_fn()
+        
+    def create_embedding_fn(self):
+        embed_fns = []
+        d = self.kwargs['input_dims']
+        out_dim = 0
+        if self.kwargs['include_input']:
+            embed_fns.append(lambda x : x)
+            out_dim += d
+            
+        max_freq = self.kwargs['max_freq_log2']
+        N_freqs = self.kwargs['num_freqs']
+        
+        if self.kwargs['log_sampling']:
+            freq_bands = 2.**torch.linspace(0., max_freq, steps=N_freqs)
+        else:
+            freq_bands = torch.linspace(2.**0., 2.**max_freq, steps=N_freqs)
+            
+        for freq in freq_bands:
+            for p_fn in self.kwargs['periodic_fns']:
+                embed_fns.append(lambda x, p_fn=p_fn, freq=freq : p_fn(x * freq))
+                out_dim += d
+                    
+        self.embed_fns = embed_fns
+        self.out_dim = out_dim
+        
+    def __call__(self, inputs):
+        return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
 
 def W(x):
 
@@ -48,7 +96,8 @@ class Trainer:
         train_dset = dataset.PCLoader(root = args.root,
                                       name = args.name,
                                       points_batch=args.points_batch,
-                                      with_normals=args.with_normals)
+                                      with_normals=args.with_normals,
+                                      batch_size = args.batch_size,)
         if self.main_thread:
             print(f"setting up dataset, train: {len(train_dset)}")
         if args.dist:
@@ -67,7 +116,18 @@ class Trainer:
                 num_workers=args.n_workers,
             )
 
-        model = network.ImplicitNet(d_in = args.d_in,
+        embed_kwargs = {
+                'include_input' : True,
+                'input_dims' : args.d_in,
+                'max_freq_log2' : args.multires-1,
+                'num_freqs' : args.multires,
+                'log_sampling' : True,
+                'periodic_fns' : [torch.sin, torch.cos],
+        }
+
+        self.embed = Embedder(**embed_kwargs)
+
+        model = network.ImplicitNet(d_in = self.embed.out_dim,
                                     dims = [int(i) for i in args.dims.split(',')],
                                     skip_in = [int(i) for i in args.skip.split(',')],
                                     geometric_init=args.geometric_init,
@@ -154,17 +214,6 @@ class Trainer:
                 print(f"start wandb logging @ {run.get_url()}")
                 self.log_f.write(f"\nwandb url @ {run.get_url()}\n")
 
-        # grid_size = 1.5
-        # num_x = 100
-        # num_y = 100
-        # num_z = 100
-        # grid_x = torch.linspace(-grid_size, grid_size, steps=num_x)
-        # grid_y = torch.linspace(-grid_size, grid_size, steps=num_y)
-        # grid_z = torch.linspace(-grid_size, grid_size, steps=num_z)
-
-        # x, y, z = torch.meshgrid(grid_x, grid_y, grid_z)
-        # self.grid = torch.stack([x, y, z]).permute(1, 2, 3, 0).numpy().reshape(-1, 3)
-
     def train_epoch(self):
         self.metric_meter.reset()
         self.time_meter.reset()
@@ -172,22 +221,28 @@ class Trainer:
         for indx, (points, normals, sampled_points) in enumerate(self.train_loader):
             
             points = points.to(self.device)
+            sampled_points = sampled_points.to(self.device)
 
             B, N, _ = points.shape
 
             if self.args.with_normals:
-                normals = normals.cuda()
+                normals = normals.to(self.device)
 
-            reconstruction_points = utils.sample_local_points(points).to(self.device)
+            reconstruction_points = utils.sample_local_points(points, local_sigma = self.args.local_sigma, sample_size = self.args.sample_N).to(self.device)
             #sampled_points = utils.sample_global_points(points.shape).to(self.device)
+
+            points = self.embed(points)
+            reconstruction_points = self.embed(reconstruction_points)
 
             sampled_points.requires_grad = True
             reconstruction_points.requires_grad = True
             points.requires_grad = True
 
+            sampled_points_embed = self.embed(sampled_points)
+
             points_density = self.model(points).view(B, N)
-            reconstruction_density = self.model(reconstruction_points).view(B, N)
-            sampled_density = self.model(sampled_points).view(B, N)
+            reconstruction_density = self.model(reconstruction_points).view(B, N*self.args.sample_N)
+            sampled_density = self.model(sampled_points_embed).view(B, N)
 
             perimeter_loss = compute_grad(sampled_points, sampled_density).norm(2, -1).mean(-1).mean()
             sdf_loss = W(sampled_density).mean(-1).mean()
@@ -196,14 +251,21 @@ class Trainer:
 
             # print(_w)
 
-            if self.args.with_normals:
-                point_normal_loss = (normals - (self.args.eta**0.5)*points_density.unsqueeze(-1)).abs().mean()
+            if self.args.use_normal:
+                point_normal_loss = (normals - (self.args.eta**0.5)*points_density.unsqueeze(-1)).abs().mean(-1).mean()
             else:
-                point_normal_loss = (1 - (self.args.eta**0.5)*points_density.unsqueeze(-1)).abs().mean()
+                point_normal_loss = (1 - ((self.args.eta**0.5)*(points_density.unsqueeze(-1).norm(2, -1)))).pow(2).mean(-1).mean()
 
-            reconstruction_loss = reconstruction_density.mean(-1).abs().mean()
+            reconstruction_loss = reconstruction_density.view(B, N, self.args.sample_N).mean(-1).abs().mean(-1).mean()
 
-            loss = reconstruction_loss*self.args.lbda + self.args.eta*perimeter_loss + self.args.mu*point_normal_loss + sdf_loss# + points_density.abs().mean()
+            del reconstruction_points, points, reconstruction_density, points_density
+
+            # sampled_reconstruction_points = utils.sample_local_points(sampled_points, local_sigma = self.args.local_sigma, sample_size = self.args.sample_N).to(self.device)
+            # sampled_reconstruction_loss = (self.model(sampled_reconstruction_points).view(B, N, self.args.sample_N) - sampled_density.unsqueeze(-1)).norm(2, -1).mean(-1).mean(-1).mean()
+
+            #geo = points_density.abs().mean()
+
+            loss = (reconstruction_loss)*self.args.lbda + self.args.eta*perimeter_loss + self.args.mu*point_normal_loss + sdf_loss
 
             self.optim.zero_grad()
 
@@ -211,7 +273,7 @@ class Trainer:
 
             self.optim.step()
 
-            metrics = {"loss": loss.item(), "rec" : reconstruction_loss.item(), "peri" : perimeter_loss.item(), "norm" : point_normal_loss.item(), "sdf" : sdf_loss.item()}
+            metrics = {"loss": loss.item(), "rec" : reconstruction_loss.item(), "peri" : perimeter_loss.item(), "sdf" : sdf_loss.item(), "norm" : point_normal_loss.item()}#, 'sample' : sampled_reconstruction_loss.item()}
             self.metric_meter.add(metrics)
 
             if self.main_thread and indx % self.args.log_every == 0:
@@ -246,7 +308,8 @@ class Trainer:
                     save_html=self.args.save_html, 
                     resolution=self.args.resolution, 
                     verbose = self.args.plot_verbose, 
-                    save_ply = self.args.save_ply
+                    save_ply = self.args.save_ply,
+                    embed = self.embed,
                     )
 
     def train(self):
@@ -254,7 +317,7 @@ class Trainer:
         for epoch in range(self.start_epoch, self.args.epochs):
             if self.main_thread:
                 print(
-                    f"epoch: {epoch}, best train: {round(best_train, 5)}, best val: {round(best_val, 5)}, lr: {round(self.optim.param_groups[0]['lr'], 5)}"
+                    f"epoch: {epoch}, steps : {self.train_steps}, best train: {round(best_train, 5)}, lr: {round(self.optim.param_groups[0]['lr'], 5)}"
                 )
                 print("---------------")
 

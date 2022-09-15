@@ -7,9 +7,11 @@ from datetime import datetime
 import time
 import os
 
-def sample_local_points(pc_input, local_sigma=1e-3):
+def sample_local_points(pc_input, local_sigma=1e-3, sample_size = 4):
 
-    batch_size, sample_size, dim = pc_input.shape
+    batch_size, N, dim = pc_input.shape
+
+    pc_input = pc_input.unsqueeze(-2).repeat(1, 1, sample_size, 1).view(batch_size, N * sample_size, dim)
 
     sample_local = pc_input + (torch.randn_like(pc_input) * local_sigma)
     
@@ -80,7 +82,7 @@ def plot_threed_scatter(points,path,epoch,in_epoch):
     offline.plot(fig1, filename=filename, auto_open=False)
 
 
-def plot_surface(decoder,path,epoch, shapename,resolution,mc_value,verbose,save_html,save_ply,overwrite = True, points=None, with_points=False, latent=None, connected=False, is_uniform_grid = True):
+def plot_surface(decoder,path,epoch, shapename,resolution,mc_value,verbose,save_html,save_ply,overwrite = True, points=None, with_points=False, latent=None, embed = None, connected=False, is_uniform_grid = True):
 
     filename = f'{path}/{epoch}_{shapename}'
 
@@ -93,7 +95,7 @@ def plot_surface(decoder,path,epoch, shapename,resolution,mc_value,verbose,save_
             caption = ["decoder : {0}".format(val.item()) for val in pnts_val.squeeze()]
             trace_pnts = get_threed_scatter_trace(points[:,-3:],caption=caption)
 
-        surface = get_surface_trace(points,decoder,latent,resolution,mc_value,is_uniform_grid,verbose,save_ply, connected)
+        surface = get_surface_trace(points,decoder,latent,resolution,mc_value,is_uniform_grid,verbose,save_ply, embed, connected)
         trace_surface = surface["mesh_trace"]
 
         layout = go.Layout(title= go.layout.Title(text=shapename), width=1200, height=1200, scene=dict(xaxis=dict(range=[-2, 2], autorange=False),
@@ -113,7 +115,7 @@ def plot_surface(decoder,path,epoch, shapename,resolution,mc_value,verbose,save_
         return surface['mesh_export']
 
 
-def get_surface_trace(points,decoder,latent,resolution,mc_value,is_uniform,verbose,save_ply, connected=False):
+def get_surface_trace(points,decoder,latent,resolution,mc_value,is_uniform,verbose,save_ply, embed, connected=False):
 
     trace = []
     meshexport = None
@@ -133,8 +135,10 @@ def get_surface_trace(points,decoder,latent,resolution,mc_value,is_uniform,verbo
 
         if (not latent is None):
             pnts = torch.cat([latent.expand(pnts.shape[0], -1), pnts], dim=1)
+        pnts = embed(pnts)
         z.append(decoder(pnts).detach().cpu().numpy())
     z = np.concatenate(z,axis=0)
+    print(z.min(), z.max(), z.mean())
 
     if (not (np.min(z) > mc_value or np.max(z) < mc_value)):
 
@@ -372,7 +376,7 @@ def add_args(parser):
     parser.add_argument("--n_cores", type=int, default=0, help="set tpu core count")
     parser.add_argument("--dist", action="store_true", help="start distributed training")
     parser.add_argument("--dset", type=str, default="cifar10", help="dataset name")
-    parser.add_argument("--batch_size", type=int, default=4, help="batch size")
+    parser.add_argument("--batch_size", type=int, default=2, help="batch size")
     parser.add_argument(
         "--n_workers", type=int, default=4, help="number of workers for dataloading"
     )
@@ -426,8 +430,12 @@ def add_args(parser):
     parser.add_argument("--plot_verbose", action = "store_true")
     parser.add_argument("--resolution", type = int, default = 512)
     parser.add_argument("--eta", type = float, default = 0.01)
-    parser.add_argument("--mu", type = float, default = 10)
-    parser.add_argument('--lbda', type = float, default = 10)
+    parser.add_argument("--mu", type = float, default = 5)
+    parser.add_argument('--lbda', type = float, default = 5)
+    parser.add_argument('--sample_N', type = int, default = 4)
+    parser.add_argument('--multires', type = int, default = 6)
+    parser.add_argument('--local_sigma', type = float, default = 1e-3)
+    parser.add_argument('--use_normal', action = "store_true")
 
     return parser
 
